@@ -55,16 +55,7 @@ const DIM:  [u8; 4] = [71,  85,  105, 255]; // slate-600
 
 // ── Font loading ──────────────────────────────────────────────────────────────
 
-fn load_system_font() -> Option<fontdue::Font> {
-    let candidates: &[&str] = &[
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/Library/Fonts/Arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
-        "C:\\Windows\\Fonts\\segoeui.ttf",
-    ];
+fn load_font(candidates: &[&str]) -> Option<fontdue::Font> {
     for path in candidates {
         if let Ok(data) = std::fs::read(path) {
             if let Ok(font) = fontdue::Font::from_bytes(
@@ -74,6 +65,30 @@ fn load_system_font() -> Option<fontdue::Font> {
         }
     }
     None
+}
+
+fn load_system_font() -> Option<fontdue::Font> {
+    load_font(&[
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/Library/Fonts/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+    ])
+}
+
+/// Font with Unicode Miscellaneous Symbols (U+2600–U+26FF) for weather icons.
+fn load_symbol_font() -> Option<fontdue::Font> {
+    load_font(&[
+        "/System/Library/Fonts/Apple Symbols.ttf",
+        "/System/Library/Fonts/Supplemental/Symbol.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+    ])
 }
 
 // ── Weather ───────────────────────────────────────────────────────────────────
@@ -206,6 +221,7 @@ fn main() {
         eprintln!("mado-clock: no system font found");
         std::process::exit(1);
     });
+    let sym_font = load_symbol_font();
 
     let dims:    Arc<Mutex<(u32, u32)>>          = Arc::new(Mutex::new((300, 400)));
     let weather: Arc<Mutex<Option<WeatherData>>> = Arc::new(Mutex::new(None));
@@ -266,7 +282,11 @@ fn main() {
             let loc_y = wx_y   + (sub_size * 1.6) as usize;
 
             // Icon + temp on same line
-            let after_icon = canvas.text(&font, wx.icon, icon_size, pad, wx_y, DATE);
+            let after_icon = if let Some(ref sf) = sym_font {
+                canvas.text(sf, wx.icon, icon_size, pad, wx_y, DATE)
+            } else {
+                pad // no symbol font — skip icon, show temp from left margin
+            };
             canvas.text(&font, &wx.temp, sub_size, after_icon + 6, wx_y, DATE);
             canvas.text(&font, &wx.loc,  sub_size, pad, loc_y, DIM);
         }
