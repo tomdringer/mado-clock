@@ -45,23 +45,6 @@ jobs:
           name: mado-clock-${{ matrix.target }}
           path: mado-clock-${{ matrix.target }}*
 
-  build-intel-mac:
-    runs-on: macos-13
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin
-      - name: Build
-        run: cargo build --release --target x86_64-apple-darwin
-      - name: Stage binary
-        run: cp target/x86_64-apple-darwin/release/mado-clock mado-clock-x86_64-apple-darwin
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mado-clock-x86_64-apple-darwin
-          path: mado-clock-x86_64-apple-darwin
-
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -75,17 +58,3 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: mado-clock-*
-
-  release-intel-mac:
-    needs: build-intel-mac
-    if: always() && needs.build-intel-mac.result == 'success'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: mado-clock-x86_64-apple-darwin
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: mado-clock-x86_64-apple-darwin
