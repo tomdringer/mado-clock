@@ -3,6 +3,7 @@ name: Release
   push:
     tags:
       - v*
+
 jobs:
   build:
     strategy:
@@ -11,44 +12,56 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-    runs-on: '${{ matrix.os }}'
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: '${{ matrix.target }}'
+          targets: ${{ matrix.target }}
       - name: Install aarch64 Linux linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Build
-        run: 'cargo build --release --target ${{ matrix.target }}'
+        run: cargo build --release --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       - name: Stage binary (Unix)
         if: runner.os != 'Windows'
-        run: >-
-          cp target/${{ matrix.target }}/release/mado-clock mado-clock-${{
-          matrix.target }}
+        run: cp target/${{ matrix.target }}/release/mado-clock mado-clock-${{ matrix.target }}
       - name: Stage binary (Windows)
         if: runner.os == 'Windows'
-        run: >-
-          cp target/${{ matrix.target }}/release/mado-clock.exe mado-clock-${{
-          matrix.target }}.exe
+        run: cp target/${{ matrix.target }}/release/mado-clock.exe mado-clock-${{ matrix.target }}.exe
       - uses: actions/upload-artifact@v4
         with:
-          name: 'mado-clock-${{ matrix.target }}'
-          path: 'mado-clock-${{ matrix.target }}*'
+          name: mado-clock-${{ matrix.target }}
+          path: mado-clock-${{ matrix.target }}*
+
+  build-intel-mac:
+    runs-on: macos-13
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - name: Build
+        run: cargo build --release --target x86_64-apple-darwin
+      - name: Stage binary
+        run: cp target/x86_64-apple-darwin/release/mado-clock mado-clock-x86_64-apple-darwin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mado-clock-x86_64-apple-darwin
+          path: mado-clock-x86_64-apple-darwin
+
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -58,7 +71,21 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+          pattern: 'mado-clock-*'
       - uses: softprops/action-gh-release@v2
         with:
           files: mado-clock-*
 
+  release-intel-mac:
+    needs: build-intel-mac
+    if: always() && needs.build-intel-mac.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mado-clock-x86_64-apple-darwin
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: mado-clock-x86_64-apple-darwin
