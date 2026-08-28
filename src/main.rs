@@ -18,6 +18,8 @@ struct ClockConfig {
     location:    String,
     /// strftime date format. Default: "%A, %-d %B"
     date_format: String,
+    /// "C", "F", or "" (auto-detect from system). Default: auto.
+    temperature_unit: String,
 }
 
 impl ClockConfig {
@@ -43,6 +45,29 @@ impl ClockConfig {
         } else {
             format!("https://wttr.in/{}?format=j1", self.location)
         }
+    }
+
+    /// Returns true if Fahrenheit should be used.
+    fn use_fahrenheit(&self) -> bool {
+        match self.temperature_unit.to_uppercase().as_str() {
+            "F" => return true,
+            "C" => return false,
+            _   => {} // fall through to auto-detect
+        }
+        // macOS: read system temperature preference
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(out) = std::process::Command::new("defaults")
+                .args(["read", "NSGlobalDomain", "AppleTemperatureUnit"])
+                .output()
+            {
+                let s = String::from_utf8_lossy(&out.stdout);
+                if s.trim().eq_ignore_ascii_case("fahrenheit") {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -103,6 +128,7 @@ struct WttrRoot {
 #[allow(non_snake_case)]
 struct Condition {
     temp_C:      String,
+    temp_F:      String,
     weatherCode: String,
 }
 
@@ -136,7 +162,7 @@ struct WeatherData {
     loc:  String,
 }
 
-fn fetch_weather(url: &str) -> Option<WeatherData> {
+fn fetch_weather(url: &str, fahrenheit: bool) -> Option<WeatherData> {
     let out = std::process::Command::new("curl")
         .args(["-s", "--max-time", "10", url])
         .output().ok()?;
@@ -144,9 +170,14 @@ fn fetch_weather(url: &str) -> Option<WeatherData> {
     let root: WttrRoot = serde_json::from_slice(&out.stdout).ok()?;
     let cond = root.current_condition.into_iter().next()?;
     let area = root.nearest_area.into_iter().next()?;
+    let temp = if fahrenheit {
+        format!("{}°F", cond.temp_F)
+    } else {
+        format!("{}°C", cond.temp_C)
+    };
     Some(WeatherData {
         icon: weather_icon(&cond.weatherCode),
-        temp: format!("{}°C", cond.temp_C),
+        temp,
         loc:  area.area_name.into_iter().next().map(|s| s.value).unwrap_or_default(),
     })
 }
@@ -193,6 +224,20 @@ impl Canvas {
         cx
     }
 
+    fn measure(font: &fontdue::Font, text: &str, size: f32) -> usize {
+        text.chars().map(|ch| {
+            let (m, _) = font.rasterize(ch, size);
+            m.advance_width.round() as usize
+        }).sum()
+    }
+
+    fn text_centered(&mut self, font: &fontdue::Font, text: &str,
+                     size: f32, y: usize, color: [u8; 4]) {
+        let tw = Self::measure(font, text, size);
+        let x  = self.w.saturating_sub(tw) / 2;
+        self.text(font, text, size, x, y, color);
+    }
+
     fn write_frame(&self, out: &mut impl Write) {
         out.write_all(b"MADO").unwrap();
         out.write_all(&(self.w as u32).to_le_bytes()).unwrap();
@@ -228,10 +273,11 @@ fn main() {
 
     // Weather refresh thread
     {
-        let weather = Arc::clone(&weather);
-        let url = cfg.weather_url();
+        let weather    = Arc::clone(&weather);
+        let url        = cfg.weather_url();
+        let fahrenheit = cfg.use_fahrenheit();
         std::thread::spawn(move || loop {
-            *weather.lock().unwrap() = fetch_weather(&url);
+            *weather.lock().unwrap() = fetch_weather(&url, fahrenheit);
             std::thread::sleep(Duration::from_secs(600));
         });
     }
@@ -264,31 +310,34 @@ fn main() {
         let time = now.format(cfg.time_fmt()).to_string();
         let date = now.format(cfg.date_fmt()).to_string();
 
-        let pad       = (w as f32 * 0.08).max(8.0) as usize;
-        let time_size = (w as f32 * 0.18).clamp(22.0, 54.0);
-        let sub_size  = (w as f32 * 0.085).clamp(10.0, 18.0);
-        let icon_size = (w as f32 * 0.12).clamp(14.0, 24.0);
+        let time_size  = (w as f32 * 0.18).clamp(22.0, 54.0);
+        let sub_size   = (w as f32 * 0.085).clamp(10.0, 18.0);
+        let icon_size  = (w as f32 * 0.24).clamp(28.0, 48.0); // 2× previous
 
         let mut canvas = Canvas::new(w, h);
 
+        // Time — centred
         let time_y = (h as f32 * 0.32) as usize;
-        canvas.text(&font, &time, time_size, pad, time_y, TIME);
+        canvas.text_centered(&font, &time, time_size, time_y, TIME);
 
+        // Date — centred
         let date_y = time_y + (time_size * 1.35) as usize;
-        canvas.text(&font, &date, sub_size, pad, date_y, DATE);
+        canvas.text_centered(&font, &date, sub_size, date_y, DATE);
 
         if let Some(ref wx) = *weather.lock().unwrap() {
-            let wx_y  = date_y + (sub_size * 2.4) as usize;
-            let loc_y = wx_y   + (sub_size * 1.6) as usize;
+            // Big icon — centred
+            let icon_y = date_y + (sub_size * 2.8) as usize;
+            if let Some(ref sf) = sym_font {
+                canvas.text_centered(sf, wx.icon, icon_size, icon_y, DATE);
+            }
 
-            // Icon + temp on same line
-            let after_icon = if let Some(ref sf) = sym_font {
-                canvas.text(sf, wx.icon, icon_size, pad, wx_y, DATE)
-            } else {
-                pad // no symbol font — skip icon, show temp from left margin
-            };
-            canvas.text(&font, &wx.temp, sub_size, after_icon + 6, wx_y, DATE);
-            canvas.text(&font, &wx.loc,  sub_size, pad, loc_y, DIM);
+            // Temp below icon — centred
+            let temp_y = icon_y + (icon_size * 0.3) as usize + sub_size as usize;
+            canvas.text_centered(&font, &wx.temp, sub_size, temp_y, DATE);
+
+            // Location — centred, dimmer
+            let loc_y = temp_y + (sub_size * 1.6) as usize;
+            canvas.text_centered(&font, &wx.loc, sub_size, loc_y, DIM);
         }
 
         canvas.write_frame(&mut out);
