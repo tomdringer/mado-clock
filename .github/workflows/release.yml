@@ -6,6 +6,7 @@ name: Release
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: macos-latest
@@ -19,6 +20,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: '${{ matrix.os }}'
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
