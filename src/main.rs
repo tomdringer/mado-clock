@@ -1,10 +1,4 @@
 // mado-clock — pixel plugin for Mado sidebar
-//
-// Reads resize/input events from stdin (newline-delimited JSON), renders a
-// clock + weather panel at the requested physical pixel dimensions, and writes
-// RGBA frames to stdout using the Mado pixel plugin protocol:
-//
-//   [4 B magic "MADO"] [u32 LE width] [u32 LE height] [w*h*4 B RGBA8]
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::{Arc, Mutex};
@@ -12,6 +6,45 @@ use std::time::Duration;
 
 use chrono::Local;
 use serde::Deserialize;
+
+// ── Config ────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ClockConfig {
+    /// "12h" or "24h". Default: "24h"
+    time_format: String,
+    /// Weather location, e.g. "London". Empty = auto-detect from IP.
+    location:    String,
+    /// strftime date format. Default: "%A, %-d %B"
+    date_format: String,
+}
+
+impl ClockConfig {
+    fn load() -> Self {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let path = std::path::Path::new(&home)
+            .join(".config/mado/plugins/clock.toml");
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        toml::from_str(&content).unwrap_or_default()
+    }
+
+    fn time_fmt(&self) -> &str {
+        if self.time_format == "12h" { "%I:%M %p" } else { "%H:%M" }
+    }
+
+    fn date_fmt(&self) -> &str {
+        if self.date_format.is_empty() { "%A, %-d %B" } else { &self.date_format }
+    }
+
+    fn weather_url(&self) -> String {
+        if self.location.is_empty() {
+            "https://wttr.in/?format=j1".into()
+        } else {
+            format!("https://wttr.in/{}?format=j1", self.location)
+        }
+    }
+}
 
 // ── Palette (Slate) ───────────────────────────────────────────────────────────
 
@@ -24,23 +57,18 @@ const DIM:  [u8; 4] = [71,  85,  105, 255]; // slate-600
 
 fn load_system_font() -> Option<fontdue::Font> {
     let candidates: &[&str] = &[
-        // macOS
         "/System/Library/Fonts/Helvetica.ttc",
         "/Library/Fonts/Arial.ttf",
-        // Linux
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-        // Windows
         "C:\\Windows\\Fonts\\arial.ttf",
         "C:\\Windows\\Fonts\\segoeui.ttf",
     ];
     for path in candidates {
         if let Ok(data) = std::fs::read(path) {
             if let Ok(font) = fontdue::Font::from_bytes(
-                data.as_slice(),
-                fontdue::FontSettings::default(),
-            ) {
+                data.as_slice(), fontdue::FontSettings::default()) {
                 return Some(font);
             }
         }
@@ -61,7 +89,6 @@ struct WttrRoot {
 struct Condition {
     temp_C:      String,
     weatherCode: String,
-    weatherDesc: Vec<Sv>,
 }
 
 #[derive(Deserialize)]
@@ -73,37 +100,37 @@ struct Area {
 #[derive(Deserialize)]
 struct Sv { value: String }
 
-fn weather_label(code: &str) -> &'static str {
+fn weather_icon(code: &str) -> &'static str {
     match code.parse::<u16>().unwrap_or(0) {
-        113                                      => "Sunny",
-        116                                      => "Partly Cloudy",
-        119 | 122                                => "Cloudy",
-        143 | 248 | 260                          => "Foggy",
-        176 | 263 | 266 | 293..=308              => "Rainy",
-        179 | 227 | 230 | 323..=338 | 371 | 395 => "Snowy",
-        182 | 185 | 281 | 284 | 311..=320        => "Sleet",
-        200 | 386..=395                          => "Stormy",
-        _                                        => "",
+        113                                      => "☀",   // Sunny
+        116                                      => "⛅",  // Partly cloudy
+        119 | 122                                => "☁",   // Cloudy
+        143 | 248 | 260                          => "≋",   // Foggy
+        176 | 263 | 266 | 293..=308              => "☔",  // Rainy
+        179 | 227 | 230 | 323..=338 | 371 | 395 => "❄",   // Snowy
+        182 | 185 | 281 | 284 | 311..=320        => "❆",   // Sleet
+        200 | 386..=395                          => "☈",   // Stormy
+        _                                        => "~",
     }
 }
 
 #[derive(Clone)]
 struct WeatherData {
-    condition: &'static str,
-    temp:      String,
-    loc:       String,
+    icon: &'static str,
+    temp: String,
+    loc:  String,
 }
 
-fn fetch_weather() -> Option<WeatherData> {
+fn fetch_weather(url: &str) -> Option<WeatherData> {
     let out = std::process::Command::new("curl")
-        .args(["-s", "--max-time", "10", "https://wttr.in/?format=j1"])
+        .args(["-s", "--max-time", "10", url])
         .output().ok()?;
     if !out.status.success() { return None; }
     let root: WttrRoot = serde_json::from_slice(&out.stdout).ok()?;
     let cond = root.current_condition.into_iter().next()?;
     let area = root.nearest_area.into_iter().next()?;
     Some(WeatherData {
-        condition: weather_label(&cond.weatherCode),
+        icon: weather_icon(&cond.weatherCode),
         temp: format!("{}°C", cond.temp_C),
         loc:  area.area_name.into_iter().next().map(|s| s.value).unwrap_or_default(),
     })
@@ -111,11 +138,7 @@ fn fetch_weather() -> Option<WeatherData> {
 
 // ── Canvas ────────────────────────────────────────────────────────────────────
 
-struct Canvas {
-    pixels: Vec<u8>,
-    w:      usize,
-    h:      usize,
-}
+struct Canvas { pixels: Vec<u8>, w: usize, h: usize }
 
 impl Canvas {
     fn new(w: usize, h: usize) -> Self {
@@ -135,8 +158,6 @@ impl Canvas {
         self.pixels[i + 3] = 255;
     }
 
-    /// Draw `text` at (`x`, baseline `y`) using `font` at `size` px; returns
-    /// the x position after the last glyph.
     fn text(&mut self, font: &fontdue::Font, text: &str,
             size: f32, x: usize, y: usize, color: [u8; 4]) -> usize {
         let mut cx = x;
@@ -179,27 +200,27 @@ struct Event {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
-    let font = match load_system_font() {
-        Some(f) => f,
-        None => {
-            eprintln!("mado-clock: no system font found — cannot render");
-            std::process::exit(1);
-        }
-    };
+    let cfg = ClockConfig::load();
 
-    let dims:    Arc<Mutex<(u32, u32)>>            = Arc::new(Mutex::new((300, 400)));
-    let weather: Arc<Mutex<Option<WeatherData>>>   = Arc::new(Mutex::new(None));
+    let font = load_system_font().unwrap_or_else(|| {
+        eprintln!("mado-clock: no system font found");
+        std::process::exit(1);
+    });
 
-    // Weather background thread — refreshes every 10 minutes
+    let dims:    Arc<Mutex<(u32, u32)>>          = Arc::new(Mutex::new((300, 400)));
+    let weather: Arc<Mutex<Option<WeatherData>>> = Arc::new(Mutex::new(None));
+
+    // Weather refresh thread
     {
         let weather = Arc::clone(&weather);
+        let url = cfg.weather_url();
         std::thread::spawn(move || loop {
-            *weather.lock().unwrap() = fetch_weather();
+            *weather.lock().unwrap() = fetch_weather(&url);
             std::thread::sleep(Duration::from_secs(600));
         });
     }
 
-    // Stdin event listener — updates dims on resize
+    // Stdin event listener
     {
         let dims = Arc::clone(&dims);
         std::thread::spawn(move || {
@@ -208,9 +229,7 @@ fn main() {
                 if let Ok(ev) = serde_json::from_str::<Event>(&line) {
                     if ev.kind == "resize" {
                         if let (Some(w), Some(h)) = (ev.width, ev.height) {
-                            if w > 0 && h > 0 {
-                                *dims.lock().unwrap() = (w, h);
-                            }
+                            if w > 0 && h > 0 { *dims.lock().unwrap() = (w, h); }
                         }
                     }
                 }
@@ -226,30 +245,30 @@ fn main() {
         let (w, h) = (w as usize, h as usize);
 
         let now  = Local::now();
-        let time = now.format("%H:%M").to_string();
-        let date = now.format("%A, %-d %B").to_string();
+        let time = now.format(cfg.time_fmt()).to_string();
+        let date = now.format(cfg.date_fmt()).to_string();
 
         let pad       = (w as f32 * 0.08).max(8.0) as usize;
         let time_size = (w as f32 * 0.18).clamp(22.0, 54.0);
         let sub_size  = (w as f32 * 0.085).clamp(10.0, 18.0);
+        let icon_size = (w as f32 * 0.12).clamp(14.0, 24.0);
 
         let mut canvas = Canvas::new(w, h);
 
-        // Time
         let time_y = (h as f32 * 0.32) as usize;
         canvas.text(&font, &time, time_size, pad, time_y, TIME);
 
-        // Date
         let date_y = time_y + (time_size * 1.35) as usize;
         canvas.text(&font, &date, sub_size, pad, date_y, DATE);
 
-        // Weather
         if let Some(ref wx) = *weather.lock().unwrap() {
-            let wx_y   = date_y + (sub_size * 2.4) as usize;
-            let loc_y  = wx_y   + (sub_size * 1.6) as usize;
-            let wx_str = format!("{}  {}", wx.condition, wx.temp);
-            canvas.text(&font, &wx_str, sub_size, pad, wx_y,  DATE);
-            canvas.text(&font, &wx.loc, sub_size, pad, loc_y, DIM);
+            let wx_y  = date_y + (sub_size * 2.4) as usize;
+            let loc_y = wx_y   + (sub_size * 1.6) as usize;
+
+            // Icon + temp on same line
+            let after_icon = canvas.text(&font, wx.icon, icon_size, pad, wx_y, DATE);
+            canvas.text(&font, &wx.temp, sub_size, after_icon + 6, wx_y, DATE);
+            canvas.text(&font, &wx.loc,  sub_size, pad, loc_y, DIM);
         }
 
         canvas.write_frame(&mut out);
